@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./app.css";
 
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -64,6 +64,57 @@ const TASK_PRIORITIES = [
   "Low Priority",
 ];
 
+const TASK_STATUS_COLUMNS = [
+  {
+    value: "To-Do List",
+    legacyValues: ["Active"],
+    emptyText: "New tasks land here when they are ready to plan.",
+  },
+  {
+    value: "In Progress",
+    legacyValues: [],
+    emptyText: "Drag a task here when work has started.",
+  },
+  {
+    value: "Completed / Closed",
+    legacyValues: ["Closed"],
+    emptyText: "Completed tasks will collect here for review.",
+  },
+];
+
+const TASK_STATUS_OPTIONS = TASK_STATUS_COLUMNS.map((column) => column.value);
+const TODO_TASK_STATUS = "To-Do List";
+const COMPLETED_TASK_STATUS = "Completed / Closed";
+
+const normalizeTaskStatus = (task) => {
+  if (task?.completed) return COMPLETED_TASK_STATUS;
+
+  const match = TASK_STATUS_COLUMNS.find(
+    (column) =>
+      column.value === task?.status ||
+      column.legacyValues.includes(task?.status)
+  );
+
+  return match?.value || TODO_TASK_STATUS;
+};
+
+const isCompletedTaskStatus = (status) =>
+  status === COMPLETED_TASK_STATUS || status === "Closed";
+
+const PLANNER_CALENDAR_MIN_WIDTH = 650;
+const UPCOMING_PANEL_MIN_WIDTH = 240;
+const UPCOMING_PANEL_MAX_WIDTH = 420;
+const PLANNER_SPLIT_HANDLE_WIDTH = 18;
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const TASK_DRAG_TYPE = "application/x-planwise-task";
+
+const getCalendarItemType = (item) => item?.itemType || "meeting";
+
+const hasTaskDragData = (event) =>
+  Array.from(event.dataTransfer?.types || []).includes(TASK_DRAG_TYPE);
+
 const timeOptions = Array.from({ length: 96 }, (_, index) => {
   const totalMinutes = index * 15;
   const hour = Math.floor(totalMinutes / 60);
@@ -86,6 +137,8 @@ const generateRecurringMeetings = (baseMeeting, frequency, daysOfWeek, until) =>
   const meetings = [];
   const startDate = parseLocalDate(baseMeeting.date);
   const endDate = parseLocalDate(until);
+
+  // Expand weekly recurrence into individual meeting instances.
   if (frequency === "Weekly") {
     for (let date = new Date(startDate); date <= endDate; date.setDate(date.getDate() + 1)) {
       const dayName = WEEKDAY_NAMES[date.getDay()];
@@ -141,6 +194,20 @@ function getDayLabelFromIso(dateIso) {
 
 function App() {
   const [activePage, setActivePage] = useState("Planner");
+  // Theme preference is stored separately from planner data.
+  const [themeMode, setThemeMode] = useState(() => {
+    try {
+      return localStorage.getItem("planwise-theme") || "light";
+    } catch {
+      return "light";
+    }
+  });
+  const [systemTheme, setSystemTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  });
   const [meetings, setMeetings] = useState(() => {
     try {
       const saved = localStorage.getItem("planwise-meetings");
@@ -157,12 +224,20 @@ function App() {
       return [];
     }
   });
+  const [focusBlocks, setFocusBlocks] = useState(() => {
+    try {
+      const saved = localStorage.getItem("planwise-focus-blocks");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [selectedMeeting, setSelectedMeeting] = useState(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDate, setNewTaskDate] = useState("");
   const [newTaskPriority, setNewTaskPriority] = useState("Critical");
-  const [newTaskStatus, setNewTaskStatus] = useState("Active");
+  const [newTaskStatus, setNewTaskStatus] = useState(TODO_TASK_STATUS);
   const [newTaskNotes, setNewTaskNotes] = useState("");
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [showCreateDropdown, setShowCreateDropdown] = useState(false);
@@ -178,6 +253,7 @@ function App() {
   const [newMeetingDaysOfWeek, setNewMeetingDaysOfWeek] = useState([]);
   const [newMeetingUntil, setNewMeetingUntil] = useState("");
 
+  // Top-level pages drive the sidebar and active view.
   const pages = [
     "Planner",
     "Tasks",
@@ -190,12 +266,39 @@ function App() {
   ];
 
   useEffect(() => {
+    // Persist meetings between refreshes.
     localStorage.setItem("planwise-meetings", JSON.stringify(meetings));
   }, [meetings]);
 
   useEffect(() => {
+    // Persist tasks between refreshes.
     localStorage.setItem("planwise-tasks", JSON.stringify(tasks));
   }, [tasks]);
+
+  useEffect(() => {
+    // Persist task-created calendar blocks separately from meetings.
+    localStorage.setItem("planwise-focus-blocks", JSON.stringify(focusBlocks));
+  }, [focusBlocks]);
+
+  useEffect(() => {
+    // Persist the selected theme mode.
+    localStorage.setItem("planwise-theme", themeMode);
+  }, [themeMode]);
+
+  useEffect(() => {
+    // Keep System Mode synced with browser preference changes.
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemTheme = () => {
+      setSystemTheme(mediaQuery.matches ? "dark" : "light");
+    };
+
+    updateSystemTheme();
+    mediaQuery.addEventListener("change", updateSystemTheme);
+
+    return () => {
+      mediaQuery.removeEventListener("change", updateSystemTheme);
+    };
+  }, []);
 
   const updateTask = (taskId, updates) => {
     setTasks((prev) =>
@@ -206,21 +309,23 @@ function App() {
   };
 
   const openTaskModal = () => {
+    // Reset task form for a fresh create flow.
     setEditingTaskId(null);
     setNewTaskTitle("");
     setNewTaskDate("");
     setNewTaskPriority("Critical");
-    setNewTaskStatus("Active");
+    setNewTaskStatus(TODO_TASK_STATUS);
     setNewTaskNotes("");
     setShowTaskModal(true);
   };
 
   const openEditTaskModal = (task) => {
+    // Hydrate the task modal with the selected card's data.
     setEditingTaskId(task.id);
     setNewTaskTitle(task.title || "");
     setNewTaskDate(task.date || "");
     setNewTaskPriority(task.priority || "Critical");
-    setNewTaskStatus(task.status || (task.completed ? "Closed" : "Active"));
+    setNewTaskStatus(normalizeTaskStatus(task));
     setNewTaskNotes(task.notes || "");
     setShowTaskModal(true);
   };
@@ -230,7 +335,7 @@ function App() {
     setNewTaskTitle("");
     setNewTaskDate("");
     setNewTaskPriority("Critical");
-    setNewTaskStatus("Active");
+    setNewTaskStatus(TODO_TASK_STATUS);
     setNewTaskNotes("");
     setEditingTaskId(null);
   };
@@ -253,9 +358,10 @@ function App() {
       priority: newTaskPriority,
       notes: newTaskNotes.trim(),
       status: newTaskStatus,
-      completed: newTaskStatus === "Closed",
+      completed: isCompletedTaskStatus(newTaskStatus),
     };
 
+    // Update an existing task or append a new one.
     if (editingTaskId) {
       updateTask(editingTaskId, updatedTask);
     } else {
@@ -275,8 +381,25 @@ function App() {
     setTasks((prev) => prev.filter((task) => task.id !== taskId));
   };
 
+  const handleClearDemoData = () => {
+    const confirmed = window.confirm(
+      "Clear all demo meetings, tasks, and focus blocks from this browser?"
+    );
+
+    if (!confirmed) return;
+
+    localStorage.removeItem("planwise-meetings");
+    localStorage.removeItem("planwise-tasks");
+    localStorage.removeItem("planwise-focus-blocks");
+    setMeetings([]);
+    setTasks([]);
+    setFocusBlocks([]);
+    setSelectedMeeting(null);
+  };
+
   const openSmartMeetingModal = () => setShowSmartMeetingModal(true);
   const closeSmartMeetingModal = () => {
+    // Reset smart meeting form state when the modal closes.
     setShowSmartMeetingModal(false);
     setNewMeetingTitle("");
     setNewMeetingLocation("");
@@ -329,6 +452,7 @@ function App() {
     let newMeetings = [];
     const formattedStartDate = localDateToIso(selectedDate);
     const meetingTimeText = `${timeOptions.find((time) => time.value === newMeetingStartTime)?.label} - ${timeOptions.find((time) => time.value === newMeetingEndTime)?.label}`;
+    // Create either one meeting or the generated recurring series.
     if (newMeetingRepeat) {
       const baseMeeting = {
         id: Date.now(),
@@ -366,6 +490,7 @@ function App() {
   };
 
   const openSmartMeetingAt = (dateIso, startTime) => {
+    // Pre-fill the meeting modal from a clicked calendar slot.
     const startIndex = timeOptions.findIndex((opt) => opt.value === startTime);
     const endIndex = Math.min(startIndex + 2, timeOptions.length - 1);
     const endTime = timeOptions[endIndex]?.value || startTime;
@@ -384,7 +509,11 @@ function App() {
   };
 
   return (
-    <div className="app">
+    <div
+      className={`app theme-${
+        themeMode === "system" ? systemTheme : themeMode
+      } theme-selection-${themeMode}`}
+    >
       <aside className="sidebar">
         <div className="brand">
           <div className="logo">P</div>
@@ -400,6 +529,11 @@ function App() {
               key={page}
               className={activePage === page ? "active" : ""}
               onClick={() => setActivePage(page)}
+              onDragOver={(event) => {
+                if (page !== "Planner" || !hasTaskDragData(event)) return;
+                event.preventDefault();
+                setActivePage("Planner");
+              }}
             >
               {page}
             </button>
@@ -414,36 +548,38 @@ function App() {
             <p>{getPageDescription(activePage)}</p>
           </div>
 
-          <div className="topbar-actions">
-            <button
-              className="topbar-btn"
-              onClick={() => setShowCreateDropdown(!showCreateDropdown)}
-            >
-              + Create
-            </button>
-            {showCreateDropdown && (
-              <div className="create-dropdown">
-                <button
-                  className="dropdown-item"
-                  onClick={() => {
-                    setShowCreateDropdown(false);
-                    openTaskModal();
-                  }}
-                >
-                  Task
-                </button>
-                <button
-                  className="dropdown-item"
-                  onClick={() => {
-                    setShowCreateDropdown(false);
-                    openSmartMeetingModal();
-                  }}
-                >
-                  Smart Meeting
-                </button>
-              </div>
-            )}
-          </div>
+          {activePage !== "Settings" && (
+            <div className="topbar-actions">
+              <button
+                className="topbar-btn"
+                onClick={() => setShowCreateDropdown(!showCreateDropdown)}
+              >
+                + Create
+              </button>
+              {showCreateDropdown && (
+                <div className="create-dropdown">
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      setShowCreateDropdown(false);
+                      openTaskModal();
+                    }}
+                  >
+                    Task
+                  </button>
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      setShowCreateDropdown(false);
+                      openSmartMeetingModal();
+                    }}
+                  >
+                    Smart Meeting
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </header>
 
         <div className="page-content">
@@ -451,9 +587,13 @@ function App() {
             <PlannerPage
               meetings={meetings}
               setMeetings={setMeetings}
+              focusBlocks={focusBlocks}
+              setFocusBlocks={setFocusBlocks}
               selectedMeeting={selectedMeeting}
               setSelectedMeeting={setSelectedMeeting}
               onCreateMeetingAt={openSmartMeetingAt}
+              tasks={tasks}
+              onEditTask={openEditTaskModal}
             />
           )}
           {activePage === "Tasks" && (
@@ -471,7 +611,13 @@ function App() {
           )}
           {activePage === "AI Notes" && <AINotesPage meetings={meetings} />}
           {activePage === "Calendar Sync" && <CalendarSyncPage />}
-          {activePage === "Settings" && <SettingsPage />}
+          {activePage === "Settings" && (
+            <SettingsPage
+              themeMode={themeMode}
+              onThemeChange={setThemeMode}
+              onClearDemoData={handleClearDemoData}
+            />
+          )}
         </div>
         {showTaskModal && (
           <div className="meeting-modal-overlay">
@@ -505,9 +651,11 @@ function App() {
                   value={newTaskStatus}
                   onChange={(e) => setNewTaskStatus(e.target.value)}
                 >
-                  <option value="Active">Active</option>
-                  <option value="In Progress">In Progress</option>
-                  <option value="Closed">Closed</option>
+                  {TASK_STATUS_OPTIONS.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
                 </select>
 
                 <textarea
@@ -517,8 +665,19 @@ function App() {
                 />
 
                 <div className="modal-actions">
+                  {editingTaskId && (
+                    <button
+                      className="secondary-btn task-delete-btn"
+                      onClick={() => {
+                        handleDeleteTask(editingTaskId);
+                        closeTaskModal();
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
                   <button className="secondary-btn" onClick={closeTaskModal}>
-                    Cancel
+                    {editingTaskId ? "Close" : "Cancel"}
                   </button>
                   <button className="primary-btn" onClick={handleSaveTask}>
                     {editingTaskId ? "Save Changes" : "Save Task"}
@@ -676,9 +835,13 @@ function getPageDescription(page) {
 function PlannerPage({
   meetings,
   setMeetings,
+  focusBlocks,
+  setFocusBlocks,
   selectedMeeting,
   setSelectedMeeting,
   onCreateMeetingAt,
+  tasks,
+  onEditTask,
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
@@ -689,9 +852,22 @@ function PlannerPage({
   const [visibleWeekStart, setVisibleWeekStart] = useState(() => getStartOfWeek(new Date()));
   const [searchQuery, setSearchQuery] = useState("");
   const [dragState, setDragState] = useState(null);
+  const [splitDragState, setSplitDragState] = useState(null);
+  const [dragOverSlot, setDragOverSlot] = useState(null);
+  const [upcomingPanelWidth, setUpcomingPanelWidth] = useState(() => {
+    try {
+      const savedWidth = Number(localStorage.getItem("planwise-upcoming-panel-width"));
+      if (!Number.isFinite(savedWidth)) return 280;
+      return clamp(savedWidth, UPCOMING_PANEL_MIN_WIDTH, UPCOMING_PANEL_MAX_WIDTH);
+    } catch {
+      return 280;
+    }
+  });
+  const plannerSplitRef = useRef(null);
 
   const todayIso = getDateKey(new Date());
 
+  // Build the visible week for the planner grid.
   const weekDays = Array.from({ length: 7 }, (_, index) => {
     const date = new Date(visibleWeekStart);
     date.setDate(date.getDate() + index);
@@ -739,22 +915,31 @@ function PlannerPage({
   };
 
   const getDayEvents = (dayIso, dayLabel) => {
-    const dayItems = meetings
+    // Merge meetings and task-created focus blocks for calendar rendering.
+    const calendarItems = [
+      ...meetings.map((meeting) => ({ ...meeting, itemType: "meeting" })),
+      ...focusBlocks.map((focusBlock) => ({
+        ...focusBlock,
+        itemType: "focus",
+      })),
+    ];
+
+    const dayItems = calendarItems
       .filter(
-        (meeting) =>
-          meeting.date === dayIso ||
-          (!meeting.date && meeting.day === dayLabel)
+        (item) =>
+          item.date === dayIso ||
+          (!item.date && item.day === dayLabel)
       )
-      .map((meeting) => {
-        const start = meeting.startHour != null
-          ? meeting.startHour * 60
-          : getMinutes(meeting.startTime);
-        const duration = meeting.duration != null
-          ? meeting.duration
-          : (getMinutes(meeting.endTime) - start) / 60;
+      .map((item) => {
+        const start = item.startHour != null
+          ? item.startHour * 60
+          : getMinutes(item.startTime);
+        const duration = item.duration != null
+          ? item.duration
+          : (getMinutes(item.endTime) - start) / 60;
         const end = start + duration * 60;
         return {
-          meeting,
+          meeting: item,
           start,
           end,
           duration,
@@ -765,6 +950,7 @@ function PlannerPage({
       .sort((a, b) => a.start - b.start || a.end - b.end);
 
     const columns = [];
+    // Assign overlap columns so simultaneous events can sit side by side.
     dayItems.forEach((item) => {
       const freeIndex = columns.findIndex((end) => end <= item.start);
       if (freeIndex >= 0) {
@@ -786,8 +972,91 @@ function PlannerPage({
     return dayItems;
   };
 
+  const getDayTasks = (dayIso) => {
+    // Show unfinished due-date tasks as subtle chips above each day.
+    return (tasks || [])
+      .filter(
+        (task) =>
+          task.date === dayIso &&
+          !task.completed &&
+          !isCompletedTaskStatus(task.status)
+      )
+      .sort(
+        (a, b) =>
+          TASK_PRIORITIES.indexOf(a.priority) - TASK_PRIORITIES.indexOf(b.priority)
+      );
+  };
+
+  const getDropSlot = (event) => {
+    // Convert a pointer position into the nearest calendar half-hour slot.
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const headerHeight = 54;
+    const clickY = event.clientY - bounds.top - headerHeight;
+    if (clickY < 0) return null;
+    const halfHourStep = Math.min(47, Math.max(0, Math.floor(clickY / 32)));
+    const startIndex = halfHourStep * 2;
+    const startTimeOpt = timeOptions[startIndex];
+    if (!startTimeOpt) return null;
+    return { halfHourStep, startIndex, startTimeOpt };
+  };
+
+  const handleTaskDragOverDay = (event, dayIso) => {
+    // Highlight the active calendar slot while dragging a task.
+    if (!hasTaskDragData(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    const slot = getDropSlot(event);
+    if (!slot) return;
+    setDragOverSlot(`${dayIso}-${slot.halfHourStep}`);
+  };
+
+  const handleTaskDropOnDay = (event, day) => {
+    // Copy a task into the calendar as a focus block.
+    if (!hasTaskDragData(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOverSlot(null);
+
+    const slot = getDropSlot(event);
+    if (!slot) return;
+
+    let draggedTask = null;
+    try {
+      draggedTask = JSON.parse(event.dataTransfer.getData(TASK_DRAG_TYPE));
+    } catch {
+      draggedTask = null;
+    }
+
+    if (!draggedTask?.title) return;
+
+    const endIndex = Math.min(slot.startIndex + 4, timeOptions.length - 1);
+    const endTimeOpt = timeOptions[endIndex];
+    const startMinutes = getMinutes(slot.startTimeOpt.value);
+    const endMinutes = getMinutes(endTimeOpt.value);
+    const durationMinutes = Math.max(30, endMinutes - startMinutes);
+
+    const focusBlock = {
+      id: Date.now(),
+      itemType: "focus",
+      taskId: draggedTask.id,
+      title: draggedTask.title,
+      location: "Focus Block",
+      date: day.iso,
+      day: getDayLabelFromIso(day.iso),
+      startTime: slot.startTimeOpt.value,
+      endTime: endTimeOpt.value,
+      startHour: startMinutes / 60,
+      duration: durationMinutes / 60,
+      aiNotes: false,
+      time: `${slot.startTimeOpt.label} - ${endTimeOpt.label}`,
+    };
+
+    setFocusBlocks((prev) => [...prev, focusBlock]);
+  };
+
   const upcomingMeetings = meetings
     .filter((meeting) => {
+      // Keep the upcoming panel focused on future meetings and search matches.
       if (!meeting.date) return false;
       const meetingDate = parseLocalDate(meeting.date);
       if (Number.isNaN(meetingDate.getTime())) return false;
@@ -816,6 +1085,7 @@ function PlannerPage({
   useEffect(() => {
     if (!dragState) return;
 
+    // Handle vertical resizing for calendar events.
     const handleMouseMove = (event) => {
       event.preventDefault();
       if (!dragState) return;
@@ -834,17 +1104,21 @@ function PlannerPage({
       const updatedDuration = halfHours * 30;
       const updatedTimeLabel = `${startOption?.label || ""} - ${endOption.label}`;
 
-      setMeetings((prev) =>
-        prev.map((meeting) => {
-          if (meeting.id !== dragState.meetingId) return meeting;
-          return {
-            ...meeting,
-            duration: updatedDuration / 60,
-            endTime: endOption.value,
-            time: updatedTimeLabel,
-          };
-        })
-      );
+      const updateCalendarItem = (item) => {
+        if (item.id !== dragState.meetingId) return item;
+        return {
+          ...item,
+          duration: updatedDuration / 60,
+          endTime: endOption.value,
+          time: updatedTimeLabel,
+        };
+      };
+
+      if (dragState.itemType === "focus") {
+        setFocusBlocks((prev) => prev.map(updateCalendarItem));
+      } else {
+        setMeetings((prev) => prev.map(updateCalendarItem));
+      }
     };
 
     const handleMouseUp = () => {
@@ -858,11 +1132,74 @@ function PlannerPage({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [dragState, setMeetings, timeOptions]);
+  }, [dragState, setFocusBlocks, setMeetings, timeOptions]);
+
+  useEffect(() => {
+    // Persist the user's planner split preference.
+    localStorage.setItem(
+      "planwise-upcoming-panel-width",
+      String(upcomingPanelWidth)
+    );
+  }, [upcomingPanelWidth]);
+
+  useEffect(() => {
+    if (!splitDragState) return;
+
+    // Handle planner panel resizing.
+    const handlePointerMove = (event) => {
+      event.preventDefault();
+      const deltaX = event.clientX - splitDragState.startX;
+      const maxWidthFromLayout = Math.max(
+        UPCOMING_PANEL_MIN_WIDTH,
+        splitDragState.containerWidth -
+          PLANNER_CALENDAR_MIN_WIDTH -
+          PLANNER_SPLIT_HANDLE_WIDTH
+      );
+      const maxWidth = Math.min(UPCOMING_PANEL_MAX_WIDTH, maxWidthFromLayout);
+      const nextWidth = clamp(
+        splitDragState.startWidth - deltaX,
+        UPCOMING_PANEL_MIN_WIDTH,
+        maxWidth
+      );
+
+      setUpcomingPanelWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      setSplitDragState(null);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [splitDragState]);
+
+  const startSplitResize = (event) => {
+    // Capture initial split dimensions before dragging the handle.
+    event.preventDefault();
+    event.stopPropagation();
+
+    const containerWidth =
+      plannerSplitRef.current?.getBoundingClientRect().width ||
+      PLANNER_CALENDAR_MIN_WIDTH +
+        PLANNER_SPLIT_HANDLE_WIDTH +
+        upcomingPanelWidth;
+
+    setSplitDragState({
+      startX: event.clientX,
+      startWidth: upcomingPanelWidth,
+      containerWidth,
+    });
+  };
 
   const openEdit = () => {
     if (!selectedMeeting) return;
 
+    // Hydrate the shared calendar item modal for editing.
     setEditTitle(selectedMeeting.title || "");
     setEditLocation(selectedMeeting.location || "");
     setEditStartTime(selectedMeeting.startTime || "");
@@ -905,20 +1242,36 @@ function PlannerPage({
       time: `${startLabel} - ${endLabel}`,
     };
 
-    setMeetings((prev) =>
-      prev.map((meeting) =>
-        meeting.id === selectedMeeting.id ? updatedMeeting : meeting
-      )
-    );
+    // Save changes back to the correct calendar collection.
+    if (getCalendarItemType(selectedMeeting) === "focus") {
+      setFocusBlocks((prev) =>
+        prev.map((focusBlock) =>
+          focusBlock.id === selectedMeeting.id ? updatedMeeting : focusBlock
+        )
+      );
+    } else {
+      setMeetings((prev) =>
+        prev.map((meeting) =>
+          meeting.id === selectedMeeting.id ? updatedMeeting : meeting
+        )
+      );
+    }
 
     setSelectedMeeting(updatedMeeting);
     setIsEditing(false);
   };
 
   const handleDelete = () => {
-    setMeetings((prev) =>
-      prev.filter((meeting) => meeting.id !== selectedMeeting.id)
-    );
+    // Delete either a meeting or focus block from its source collection.
+    if (getCalendarItemType(selectedMeeting) === "focus") {
+      setFocusBlocks((prev) =>
+        prev.filter((focusBlock) => focusBlock.id !== selectedMeeting.id)
+      );
+    } else {
+      setMeetings((prev) =>
+        prev.filter((meeting) => meeting.id !== selectedMeeting.id)
+      );
+    }
     setSelectedMeeting(null);
     setIsEditing(false);
   };
@@ -972,7 +1325,13 @@ function PlannerPage({
         </div>
       </div>
 
-      <div className="planner-main-grid">
+      <div
+        className={`planner-main-grid ${splitDragState ? "is-resizing" : ""}`}
+        ref={plannerSplitRef}
+        style={{
+          "--upcoming-panel-width": `${upcomingPanelWidth}px`,
+        }}
+      >
         <div className="calendar-layout">
           <div className="time-column">
             <div className="corner-cell"></div>
@@ -984,30 +1343,69 @@ function PlannerPage({
           </div>
 
           <div className="calendar-days">
-            {weekDays.map((day) => (
-              <div
-                className={`day-column ${day.isToday ? "today-column" : ""}`}
-                key={day.iso}
-                onClick={(event) => {
-                  const target = event.currentTarget;
-                  const bounds = target.getBoundingClientRect();
-                  const headerHeight = 54;
-                  const clickY = event.clientY - bounds.top - headerHeight;
-                  if (clickY < 0) return;
-                  const halfHourStep = Math.min(47, Math.floor(clickY / 32));
-                  const startTimeOpt = timeOptions[halfHourStep * 2];
-                  if (!startTimeOpt) return;
-                  onCreateMeetingAt(day.iso, startTimeOpt.value);
-                }}
-              >
-                <div className={`day-title ${day.isToday ? "day-title-today" : ""}`}>
-                  <span>{day.label}</span>
-                  {day.isToday && <span className="today-pill">Today</span>}
-                </div>
+            {weekDays.map((day) => {
+              const dayTasks = getDayTasks(day.iso);
+              return (
+                // Render weekly calendar columns with click and drop targets.
+                <div
+                  className={`day-column ${day.isToday ? "today-column" : ""} ${
+                    dragOverSlot?.startsWith(`${day.iso}-`) ? "task-drop-active" : ""
+                  }`}
+                  key={day.iso}
+                  style={{
+                    "--drop-slot-top": dragOverSlot?.startsWith(`${day.iso}-`)
+                      ? `${54 + Number(dragOverSlot.split("-").pop()) * 32}px`
+                      : "54px",
+                  }}
+                  onDragOver={(event) => handleTaskDragOverDay(event, day.iso)}
+                  onDragLeave={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) {
+                      setDragOverSlot(null);
+                    }
+                  }}
+                  onDrop={(event) => handleTaskDropOnDay(event, day)}
+                  onClick={(event) => {
+                    const target = event.currentTarget;
+                    const bounds = target.getBoundingClientRect();
+                    const headerHeight = 54;
+                    const clickY = event.clientY - bounds.top - headerHeight;
+                    if (clickY < 0) return;
+                    const halfHourStep = Math.min(47, Math.floor(clickY / 32));
+                    const startTimeOpt = timeOptions[halfHourStep * 2];
+                    if (!startTimeOpt) return;
+                    onCreateMeetingAt(day.iso, startTimeOpt.value);
+                  }}
+                >
+                  <div className={`day-title ${day.isToday ? "day-title-today" : ""}`}>
+                    <span>{day.label}</span>
+                    {day.isToday && <span className="today-pill">Today</span>}
+                  </div>
 
-                {hours.map((hour) => (
-                  <div className="calendar-hour" key={hour}></div>
-                ))}
+                  {dayTasks.length > 0 && (
+                    <div className="calendar-task-list">
+                      {dayTasks.map((task) => (
+                        <button
+                          key={task.id}
+                          type="button"
+                          className="calendar-task-card clickable-event"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onEditTask(task);
+                          }}
+                        >
+                          <span className="calendar-task-dot" aria-hidden="true" />
+                          <span className="calendar-task-card-title">
+                            {task.title}
+                          </span>
+                          <span className="calendar-task-label">Task</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {hours.map((hour) => (
+                    <div className="calendar-hour" key={hour}></div>
+                  ))}
 
                 {getDayEvents(day.iso, day.label).map((item) => {
                   const calendarStartMinutes = 0;
@@ -1016,11 +1414,14 @@ function PlannerPage({
                   const gapWidth = item.maxOverlap > 1 ? 1.5 : 0;
                   const width = cellWidth - gapWidth;
                   const left = item.column * cellWidth + (gapWidth / 2);
+                  const itemType = getCalendarItemType(item.meeting);
 
                   return (
                     <div
-                      key={item.meeting.id}
-                      className="event meeting clickable-event"
+                      key={`${itemType}-${item.meeting.id}`}
+                      className={`event ${itemType === "focus" ? "focus-block" : "meeting"} clickable-event ${
+                        item.duration <= 0.5 ? "event-compact" : ""
+                      }`}
                       onClick={(event) => {
                         event.stopPropagation();
                         setSelectedMeeting(item.meeting);
@@ -1034,14 +1435,13 @@ function PlannerPage({
                         overflow: "hidden",
                       }}
                     >
-                      {item.meeting.title}
-                      <br />
-                      {item.meeting.time}
-                      {item.meeting.aiNotes && (
-                        <>
-                          <br />
-                          AI Notes On
-                        </>
+                      <span className="event-title">{item.meeting.title}</span>
+                      <span className="event-time">{item.meeting.time}</span>
+                      {itemType === "focus" && (
+                        <span className="event-note">Focus Block</span>
+                      )}
+                      {itemType === "meeting" && item.meeting.aiNotes && (
+                        <span className="event-note">AI Notes On</span>
                       )}
                       <div
                         style={{
@@ -1064,6 +1464,7 @@ function PlannerPage({
                             : getMinutes(item.meeting.endTime) - getMinutes(item.meeting.startTime);
                           setDragState({
                             meetingId: item.meeting.id,
+                            itemType,
                             startY: event.clientY,
                             initialDurationMinutes,
                             startIndex,
@@ -1074,9 +1475,19 @@ function PlannerPage({
                   );
                 })}
               </div>
-            ))}
+            );
+          })}
           </div>
         </div>
+
+        <button
+          type="button"
+          className="planner-resize-handle"
+          aria-label="Resize upcoming meetings panel"
+          onPointerDown={startSplitResize}
+        >
+          <span aria-hidden="true" />
+        </button>
 
         <aside className="upcoming-panel">
           <div className="upcoming-header">
@@ -1098,6 +1509,7 @@ function PlannerPage({
                   key={meeting.id}
                   type="button"
                   className="upcoming-item clickable-event"
+                  aria-label={`Open details for ${meeting.title}`}
                   onClick={() => setSelectedMeeting(meeting)}
                 >
                   <div className="upcoming-item-header">
@@ -1125,18 +1537,28 @@ function PlannerPage({
           <div className="meeting-modal">
             {isEditing ? (
               <>
-                <h3>Edit Meeting</h3>
+                <h3>
+                  Edit {getCalendarItemType(selectedMeeting) === "focus" ? "Focus Block" : "Meeting"}
+                </h3>
 
                 <input
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
-                  placeholder="Meeting title"
+                  placeholder={
+                    getCalendarItemType(selectedMeeting) === "focus"
+                      ? "Focus block title"
+                      : "Meeting title"
+                  }
                 />
 
                 <input
                   value={editLocation}
                   onChange={(e) => setEditLocation(e.target.value)}
-                  placeholder="Meeting location"
+                  placeholder={
+                    getCalendarItemType(selectedMeeting) === "focus"
+                      ? "Focus block label"
+                      : "Meeting location"
+                  }
                 />
 
                 <select
@@ -1163,34 +1585,54 @@ function PlannerPage({
                   ))}
                 </select>
 
-                <label className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={editAiNotes}
-                    onChange={(e) => setEditAiNotes(e.target.checked)}
-                  />
-                  Enable AI Notes
-                </label>
+                {getCalendarItemType(selectedMeeting) === "meeting" && (
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={editAiNotes}
+                      onChange={(e) => setEditAiNotes(e.target.checked)}
+                    />
+                    Enable AI Notes
+                  </label>
+                )}
               </>
             ) : (
               <>
                 <h3>{selectedMeeting.title}</h3>
                 <p>
+                  <strong>Type:</strong>{" "}
+                  {getCalendarItemType(selectedMeeting) === "focus"
+                    ? "Focus Block"
+                    : "Meeting"}
+                </p>
+                <p>
                   <strong>Day:</strong>{" "}
                   {selectedMeeting.day || getDayLabelFromIso(selectedMeeting.date)}
                 </p>
                 <p>
+                  <strong>Date:</strong> {formatDueDate(selectedMeeting.date)}
+                </p>
+                <p>
                   <strong>Time:</strong> {selectedMeeting.time}
                 </p>
-                <p>
-                  <strong>Location:</strong>{" "}
-                  {selectedMeeting.location || "No location added"}
-                </p>
-                <p>
-                  <strong>AI Notes:</strong>{" "}
-                  {selectedMeeting.aiNotes ? "Enabled" : "Disabled"}
-                </p>
-                {selectedMeeting.recurrence && (
+                {getCalendarItemType(selectedMeeting) === "meeting" ? (
+                  <>
+                    <p>
+                      <strong>Location:</strong>{" "}
+                      {selectedMeeting.location || "No location added"}
+                    </p>
+                    <p>
+                      <strong>AI Notes:</strong>{" "}
+                      {selectedMeeting.aiNotes ? "Enabled" : "Disabled"}
+                    </p>
+                  </>
+                ) : (
+                  <p>
+                    <strong>Source:</strong>{" "}
+                    {selectedMeeting.location || "Task focus block"}
+                  </p>
+                )}
+                {getCalendarItemType(selectedMeeting) === "meeting" && selectedMeeting.recurrence && (
                   <p>
                     <strong>Recurring:</strong> {selectedMeeting.recurrence.frequency} on {selectedMeeting.recurrence.daysOfWeek.join(", ")} until {formatDueDate(selectedMeeting.recurrence.until)}
                   </p>
@@ -1233,37 +1675,44 @@ function PlannerPage({
 }
 
 function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
-  const columns = ["Active", "In Progress", "Closed"];
+  const suppressTaskClickRef = useRef(false);
 
-  const groupedTasks = columns.reduce((acc, column) => {
-    acc[column] = [];
+  // Group tasks by current labels while honoring legacy saved statuses.
+  const groupedTasks = TASK_STATUS_COLUMNS.reduce((acc, column) => {
+    acc[column.value] = [];
     return acc;
   }, {});
 
   tasks.forEach((task) => {
-    const status = columns.includes(task.status)
-      ? task.status
-      : task.completed
-      ? "Closed"
-      : "Active";
+    const status = normalizeTaskStatus(task);
     groupedTasks[status].push(task);
   });
 
   const handleDrop = (event, column) => {
+    // Move tasks between board columns without changing their content.
     event.preventDefault();
     const taskId = event.dataTransfer.getData("text/plain");
     if (!taskId) return;
     const id = Number(taskId);
-    if (column === "Closed") {
-      onUpdateTask(id, { completed: true, status: "Closed" });
+    if (column.value === COMPLETED_TASK_STATUS) {
+      onUpdateTask(id, { completed: true, status: COMPLETED_TASK_STATUS });
     } else {
-      onUpdateTask(id, { completed: false, status: column });
+      onUpdateTask(id, { completed: false, status: column.value });
     }
   };
 
-  const handleDragStart = (event, taskId) => {
-    event.dataTransfer.setData("text/plain", String(taskId));
-    event.dataTransfer.effectAllowed = "move";
+  const handleDragStart = (event, task) => {
+    // Include both board move data and calendar focus-block data.
+    suppressTaskClickRef.current = true;
+    event.dataTransfer.setData("text/plain", String(task.id));
+    event.dataTransfer.setData(
+      TASK_DRAG_TYPE,
+      JSON.stringify({
+        id: task.id,
+        title: task.title,
+      })
+    );
+    event.dataTransfer.effectAllowed = "copyMove";
   };
 
   const handlePriorityChange = (taskId, priority) => {
@@ -1272,77 +1721,78 @@ function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
 
   return (
     <section className="tasks-board">
-      {columns.map((column) => (
+      {TASK_STATUS_COLUMNS.map((column) => (
         <div
-          key={column}
-          className="tasks-column"
+          key={column.value}
+          className={`tasks-column tasks-column-${column.value
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")}`}
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => handleDrop(event, column)}
         >
           <div className="tasks-column-header">
-            <h3>{column}</h3>
-            {column === "Closed" && (
+            <h3>{column.value}</h3>
+            {column.value === COMPLETED_TASK_STATUS && (
               <span className="tasks-column-count">
-                {groupedTasks.Closed.length}
+                {groupedTasks[COMPLETED_TASK_STATUS].length}
               </span>
             )}
           </div>
-          {groupedTasks[column].length === 0 ? (
-            <p className="empty-text">No tasks</p>
+          {groupedTasks[column.value].length === 0 ? (
+            <div className="board-empty-state">
+              <h4>No {column.value.toLowerCase()} tasks</h4>
+              <p>{column.emptyText}</p>
+            </div>
           ) : (
-            groupedTasks[column].map((task) => (
+            groupedTasks[column.value].map((task) => {
+              const taskIsCompleted =
+                task.completed || normalizeTaskStatus(task) === COMPLETED_TASK_STATUS;
+              return (
               <div
                 key={task.id}
-                className={`task-card task-card-drag ${task.completed ? "task-completed" : ""}`}
+                className={`task-card task-card-drag task-card-${column.value
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, "-")
+                  .replace(/^-|-$/g, "")} ${taskIsCompleted ? "task-completed" : ""}`}
                 draggable
-                onDragStart={(event) => handleDragStart(event, task.id)}
+                onDragStart={(event) => handleDragStart(event, task)}
+                onDragEnd={() => {
+                  window.setTimeout(() => {
+                    suppressTaskClickRef.current = false;
+                  }, 0);
+                }}
+                onClick={() => {
+                  if (suppressTaskClickRef.current) return;
+                  onEditTask(task);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onEditTask(task);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
               >
                 <div className="task-card-top">
                   <div className="task-card-title-wrap">
-                    <strong className={task.completed ? "task-title-closed" : ""}>
+                    <strong className={taskIsCompleted ? "task-title-closed" : ""}>
                       {task.title}
                     </strong>
-                    {task.completed && (
-                      <span className="task-status-pill">Closed</span>
+                    {taskIsCompleted && (
+                      <span className="task-status-pill">Completed</span>
                     )}
                   </div>
-                </div>
-                <div className="task-card-priority-row">
-                  <label>
-                    Priority
-                    <select
-                      value={task.priority}
-                      onChange={(e) => handlePriorityChange(task.id, e.target.value)}
-                    >
-                      {TASK_PRIORITIES.map((priorityOption) => (
-                        <option key={priorityOption} value={priorityOption}>
-                          {priorityOption}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
                 </div>
                 <p className="task-card-meta">Due {formatDueDate(task.date)}</p>
                 {task.notes && <p className="task-card-note">{task.notes}</p>}
                 <div className="task-card-bottom">
                   <span className="task-priority-chip">{task.priority}</span>
-                  <div className="task-card-actions">
-                    <button
-                      className="secondary-btn task-edit-btn"
-                      onClick={() => onEditTask(task)}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className="secondary-btn task-delete-btn"
-                      onClick={() => onDeleteTask(task.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
                 </div>
               </div>
-            ))
+            );
+            })
           )}
         </div>
       ))}
@@ -1449,6 +1899,7 @@ function SmartMeetingsPage({ setMeetings }) {
     }
 
     let newMeetings = [];
+    // Smart Meetings can create either one event or a recurring series.
     if (repeat) {
       const baseMeeting = {
         id: Date.now(),
@@ -1626,9 +2077,12 @@ function AINotesPage({ meetings }) {
       <p>Meeting notes will appear here after transcription and summarization.</p>
 
       {aiMeetings.length === 0 ? (
-        <div className="note-preview">
+        <div className="empty-state-card">
           <h3>No AI note-enabled meetings yet</h3>
-          <p>Create a Smart Meeting and turn on AI Notes to see it here.</p>
+          <p>
+            Turn on AI Notes when creating a Smart Meeting. Summaries, decisions,
+            and action items will appear here after the meeting.
+          </p>
         </div>
       ) : (
         aiMeetings.map((meeting) => (
@@ -1654,6 +2108,14 @@ function CalendarSyncPage() {
       <h2>Calendar Integrations</h2>
       <p>Connect your calendars to keep PlanWISE AI updated.</p>
 
+      <div className="empty-state-card integration-empty-state">
+        <h3>No calendars connected</h3>
+        <p>
+          Connect Google Calendar or Outlook Calendar when you are ready to keep
+          meetings, focus blocks, and availability in sync.
+        </p>
+      </div>
+
       <div className="integration-row">
         <button className="secondary-btn">Connect Google Calendar</button>
         <button className="secondary-btn">Connect Outlook Calendar</button>
@@ -1662,11 +2124,73 @@ function CalendarSyncPage() {
   );
 }
 
-function SettingsPage() {
+function SettingsPage({ themeMode, onThemeChange, onClearDemoData }) {
+  // Theme options map directly to root app classes.
+  const themeOptions = [
+    {
+      value: "light",
+      title: "Light Mode",
+      description: "Bright, clean planning workspace.",
+    },
+    {
+      value: "dark",
+      title: "Dark Mode",
+      description: "Deeper contrast for low-light planning.",
+    },
+    {
+      value: "system",
+      title: "System Mode",
+      description: "Match your device appearance.",
+    },
+  ];
+
   return (
     <section className="empty-card">
       <h2>Settings</h2>
       <p>Customize your planner, AI preferences, and calendar sync options.</p>
+
+      <div className="settings-card settings-theme-card" aria-labelledby="appearance-heading">
+        <div className="settings-card-copy">
+          <span className="settings-kicker">Appearance</span>
+          <h3 id="appearance-heading">Theme Settings</h3>
+          <p>Choose the visual mode for PlanWISE AI. Changes apply immediately.</p>
+        </div>
+
+        <div className="theme-option-grid" role="radiogroup" aria-label="Theme mode">
+          {themeOptions.map((option) => (
+            <label
+              key={option.value}
+              className={`theme-option ${
+                themeMode === option.value ? "selected" : ""
+              }`}
+            >
+              <input
+                type="radio"
+                name="themeMode"
+                value={option.value}
+                checked={themeMode === option.value}
+                onChange={() => onThemeChange(option.value)}
+              />
+              <span className="theme-option-indicator" aria-hidden="true" />
+              <span>{option.title}</span>
+              <small>{option.description}</small>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <div>
+          <h3>Demo Data</h3>
+          <p>
+            Remove saved demo meetings and tasks from this browser. Your planner
+            will return to an empty state.
+          </p>
+        </div>
+        <button className="danger-btn" onClick={onClearDemoData}>
+          Clear Demo Data
+        </button>
+      </div>
     </section>
   );
 }
