@@ -105,6 +105,9 @@ const PLANNER_CALENDAR_MIN_WIDTH = 650;
 const UPCOMING_PANEL_MIN_WIDTH = 240;
 const UPCOMING_PANEL_MAX_WIDTH = 420;
 const PLANNER_SPLIT_HANDLE_WIDTH = 18;
+const CALENDAR_HALF_HOUR_HEIGHT = 32;
+const CALENDAR_RESIZE_STEP_MINUTES = 15;
+const MIN_CALENDAR_EVENT_MINUTES = 15;
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -192,6 +195,58 @@ function getDayLabelFromIso(dateIso) {
   return formatDateLabel(date);
 }
 
+function isSameLocalDay(dateA, dateB) {
+  return (
+    dateA.getFullYear() === dateB.getFullYear() &&
+    dateA.getMonth() === dateB.getMonth() &&
+    dateA.getDate() === dateB.getDate()
+  );
+}
+
+function getTaskReminderStatus(task, now) {
+  if (!task?.date || task.completed || isCompletedTaskStatus(task.status)) {
+    return null;
+  }
+
+  const dueDate = parseLocalDate(task.date);
+  if (Number.isNaN(dueDate.getTime())) return null;
+
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  if (dueDate < today) return "overdue";
+  if (isSameLocalDay(dueDate, today)) return "today";
+  return null;
+}
+
+function getMeetingDateTime(meeting, timeKey) {
+  if (!meeting?.date || !meeting?.[timeKey]) return null;
+  const date = parseLocalDate(meeting.date);
+  if (Number.isNaN(date.getTime())) return null;
+  const [hours, minutes] = meeting[timeKey].split(":").map(Number);
+  date.setHours(hours, minutes, 0, 0);
+  return date;
+}
+
+function getMeetingReminderStatus(meeting, now) {
+  const start = getMeetingDateTime(meeting, "startTime");
+  const end = getMeetingDateTime(meeting, "endTime");
+  if (!start || !end || !isSameLocalDay(start, now)) return null;
+
+  if (now >= start && now < end) {
+    return { type: "live", label: "Live Now" };
+  }
+
+  const minutesUntilStart = Math.round((start - now) / 60000);
+  if (minutesUntilStart >= 0 && minutesUntilStart <= 60) {
+    return {
+      type: "soon",
+      label: minutesUntilStart === 0 ? "Starts now" : `Starts in ${minutesUntilStart} min`,
+    };
+  }
+
+  return null;
+}
+
 function App() {
   const [activePage, setActivePage] = useState("Planner");
   // Theme preference is stored separately from planner data.
@@ -208,6 +263,7 @@ function App() {
       ? "dark"
       : "light";
   });
+  const [currentTime, setCurrentTime] = useState(() => new Date());
   const [meetings, setMeetings] = useState(() => {
     try {
       const saved = localStorage.getItem("planwise-meetings");
@@ -297,6 +353,17 @@ function App() {
 
     return () => {
       mediaQuery.removeEventListener("change", updateSystemTheme);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Refresh reminder badges and countdowns without a page reload.
+    const timer = window.setInterval(() => {
+      setCurrentTime(new Date());
+    }, 60000);
+
+    return () => {
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -594,6 +661,7 @@ function App() {
               onCreateMeetingAt={openSmartMeetingAt}
               tasks={tasks}
               onEditTask={openEditTaskModal}
+              currentTime={currentTime}
             />
           )}
           {activePage === "Tasks" && (
@@ -602,9 +670,12 @@ function App() {
               onDeleteTask={handleDeleteTask}
               onUpdateTask={updateTask}
               onEditTask={openEditTaskModal}
+              currentTime={currentTime}
             />
           )}
-          {activePage === "Stats" && <StatsPage />}
+          {activePage === "Stats" && (
+            <StatsPage tasks={tasks} meetings={meetings} />
+          )}
           {activePage === "Time Blocking" && <TimeBlockingPage />}
           {activePage === "Smart Meetings" && (
             <SmartMeetingsPage setMeetings={setMeetings} />
@@ -621,48 +692,63 @@ function App() {
         </div>
         {showTaskModal && (
           <div className="meeting-modal-overlay">
-            <div className="meeting-modal">
-              <h3>{editingTaskId ? "Edit Task" : "New Task"}</h3>
+            <div className="meeting-modal task-detail-modal">
+              <h3>{editingTaskId ? "Task Details" : "New Task"}</h3>
               <div className="form-box">
-                <input
-                  placeholder="Task title"
-                  value={newTaskTitle}
-                  onChange={(e) => setNewTaskTitle(e.target.value)}
-                />
+                <label className="form-field">
+                  <span>Title</span>
+                  <input
+                    placeholder="Task title"
+                    value={newTaskTitle}
+                    onChange={(e) => setNewTaskTitle(e.target.value)}
+                  />
+                </label>
 
-                <input
-                  type="date"
-                  value={newTaskDate}
-                  onChange={(e) => setNewTaskDate(e.target.value)}
-                />
+                <label className="form-field">
+                  <span>Due date</span>
+                  <input
+                    type="date"
+                    value={newTaskDate}
+                    onChange={(e) => setNewTaskDate(e.target.value)}
+                  />
+                </label>
 
-                <select
-                  value={newTaskPriority}
-                  onChange={(e) => setNewTaskPriority(e.target.value)}
-                >
-                  {TASK_PRIORITIES.map((priority) => (
-                    <option key={priority} value={priority}>
-                      {priority}
-                    </option>
-                  ))}
-                </select>
+                <label className="form-field">
+                  <span>Priority</span>
+                  <select
+                    value={newTaskPriority}
+                    onChange={(e) => setNewTaskPriority(e.target.value)}
+                  >
+                    {TASK_PRIORITIES.map((priority) => (
+                      <option key={priority} value={priority}>
+                        {priority}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-                <select
-                  value={newTaskStatus}
-                  onChange={(e) => setNewTaskStatus(e.target.value)}
-                >
-                  {TASK_STATUS_OPTIONS.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </select>
+                <label className="form-field">
+                  <span>Status</span>
+                  <select
+                    value={newTaskStatus}
+                    onChange={(e) => setNewTaskStatus(e.target.value)}
+                  >
+                    {TASK_STATUS_OPTIONS.map((status) => (
+                      <option key={status} value={status}>
+                        {status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-                <textarea
-                  placeholder="Notes"
-                  value={newTaskNotes}
-                  onChange={(e) => setNewTaskNotes(e.target.value)}
-                />
+                <label className="form-field">
+                  <span>Notes</span>
+                  <textarea
+                    placeholder="Notes or description"
+                    value={newTaskNotes}
+                    onChange={(e) => setNewTaskNotes(e.target.value)}
+                  />
+                </label>
 
                 <div className="modal-actions">
                   {editingTaskId && (
@@ -842,13 +928,16 @@ function PlannerPage({
   onCreateMeetingAt,
   tasks,
   onEditTask,
+  currentTime,
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
+  const [editDate, setEditDate] = useState("");
   const [editLocation, setEditLocation] = useState("");
   const [editStartTime, setEditStartTime] = useState("");
   const [editEndTime, setEditEndTime] = useState("");
   const [editAiNotes, setEditAiNotes] = useState(false);
+  const [editNotes, setEditNotes] = useState("");
   const [visibleWeekStart, setVisibleWeekStart] = useState(() => getStartOfWeek(new Date()));
   const [searchQuery, setSearchQuery] = useState("");
   const [dragState, setDragState] = useState(null);
@@ -1085,23 +1174,37 @@ function PlannerPage({
   useEffect(() => {
     if (!dragState) return;
 
-    // Handle vertical resizing for calendar events.
+    // Resize calendar events in 15-minute increments.
     const handleMouseMove = (event) => {
       event.preventDefault();
       if (!dragState) return;
 
       const deltaY = event.clientY - dragState.startY;
-      const stepChange = Math.round(deltaY / 32);
-      const rawHalfHours = Math.round((dragState.initialDurationMinutes + stepChange * 30) / 30);
-      const minHalfHours = 1;
-      const maxHalfHours = Math.floor((95 - dragState.startIndex) / 2);
-      const halfHours = Math.max(minHalfHours, Math.min(maxHalfHours, rawHalfHours));
-      const endIndex = dragState.startIndex + halfHours * 2;
+      const pixelsPerStep =
+        CALENDAR_HALF_HOUR_HEIGHT / (30 / CALENDAR_RESIZE_STEP_MINUTES);
+      const stepChange = Math.round(deltaY / pixelsPerStep);
+      const initialStepCount = Math.round(
+        dragState.initialDurationMinutes / CALENDAR_RESIZE_STEP_MINUTES
+      );
+      const maxStepCount = Math.max(
+        1,
+        timeOptions.length - 1 - dragState.startIndex
+      );
+      const minStepCount = Math.min(
+        Math.ceil(MIN_CALENDAR_EVENT_MINUTES / CALENDAR_RESIZE_STEP_MINUTES),
+        maxStepCount
+      );
+      const nextStepCount = clamp(
+        initialStepCount + stepChange,
+        minStepCount,
+        maxStepCount
+      );
+      const endIndex = dragState.startIndex + nextStepCount;
       const endOption = timeOptions[endIndex];
       if (!endOption) return;
 
       const startOption = timeOptions[dragState.startIndex];
-      const updatedDuration = halfHours * 30;
+      const updatedDuration = nextStepCount * CALENDAR_RESIZE_STEP_MINUTES;
       const updatedTimeLabel = `${startOption?.label || ""} - ${endOption.label}`;
 
       const updateCalendarItem = (item) => {
@@ -1201,18 +1304,46 @@ function PlannerPage({
 
     // Hydrate the shared calendar item modal for editing.
     setEditTitle(selectedMeeting.title || "");
+    setEditDate(selectedMeeting.date || "");
     setEditLocation(selectedMeeting.location || "");
     setEditStartTime(selectedMeeting.startTime || "");
     setEditEndTime(selectedMeeting.endTime || "");
     setEditAiNotes(Boolean(selectedMeeting.aiNotes));
+    setEditNotes(selectedMeeting.notes || "");
     setIsEditing(true);
   };
+
+  useEffect(() => {
+    if (!selectedMeeting) return;
+    openEdit();
+  }, [selectedMeeting]);
+
+  useEffect(() => {
+    if (!selectedMeeting) return;
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        handleClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [selectedMeeting]);
 
   const handleSaveEdit = () => {
     if (!selectedMeeting) return;
 
-    if (!editTitle || !editStartTime || !editEndTime) {
-      alert("Please fill in a title, start time, and end time.");
+    if (!editTitle || !editDate || !editStartTime || !editEndTime) {
+      alert("Please fill in a title, date, start time, and end time.");
+      return;
+    }
+
+    const selectedDate = parseLocalDate(editDate);
+    if (Number.isNaN(selectedDate.getTime())) {
+      alert("Please choose a valid date.");
       return;
     }
 
@@ -1233,12 +1364,15 @@ function PlannerPage({
     const updatedMeeting = {
       ...selectedMeeting,
       title: editTitle,
+      date: editDate,
+      day: getDayLabelFromIso(editDate),
       location: editLocation.trim() ? editLocation.trim() : "No location added",
       startTime: editStartTime,
       endTime: editEndTime,
       startHour,
       duration,
       aiNotes: editAiNotes,
+      notes: editNotes.trim(),
       time: `${startLabel} - ${endLabel}`,
     };
 
@@ -1279,6 +1413,29 @@ function PlannerPage({
   const handleClose = () => {
     setSelectedMeeting(null);
     setIsEditing(false);
+  };
+
+  const handleCalendarSlotClick = (event, dayIso) => {
+    // Only empty grid clicks should open the Smart Meeting modal.
+    if (
+      event.target.closest(
+        ".event, .calendar-task-card, .day-title, .event-resize-handle"
+      )
+    ) {
+      return;
+    }
+
+    const target = event.currentTarget;
+    const bounds = target.getBoundingClientRect();
+    const headerHeight = 54;
+    const clickY = event.clientY - bounds.top - headerHeight;
+    if (clickY < 0) return;
+
+    const halfHourStep = Math.min(47, Math.floor(clickY / 32));
+    const startTimeOpt = timeOptions[halfHourStep * 2];
+    if (!startTimeOpt) return;
+
+    onCreateMeetingAt(dayIso, startTimeOpt.value);
   };
 
   return (
@@ -1364,17 +1521,7 @@ function PlannerPage({
                     }
                   }}
                   onDrop={(event) => handleTaskDropOnDay(event, day)}
-                  onClick={(event) => {
-                    const target = event.currentTarget;
-                    const bounds = target.getBoundingClientRect();
-                    const headerHeight = 54;
-                    const clickY = event.clientY - bounds.top - headerHeight;
-                    if (clickY < 0) return;
-                    const halfHourStep = Math.min(47, Math.floor(clickY / 32));
-                    const startTimeOpt = timeOptions[halfHourStep * 2];
-                    if (!startTimeOpt) return;
-                    onCreateMeetingAt(day.iso, startTimeOpt.value);
-                  }}
+                  onClick={(event) => handleCalendarSlotClick(event, day.iso)}
                 >
                   <div className={`day-title ${day.isToday ? "day-title-today" : ""}`}>
                     <span>{day.label}</span>
@@ -1415,12 +1562,20 @@ function PlannerPage({
                   const width = cellWidth - gapWidth;
                   const left = item.column * cellWidth + (gapWidth / 2);
                   const itemType = getCalendarItemType(item.meeting);
+                  const meetingReminder =
+                    itemType === "meeting"
+                      ? getMeetingReminderStatus(item.meeting, currentTime)
+                      : null;
 
                   return (
                     <div
                       key={`${itemType}-${item.meeting.id}`}
                       className={`event ${itemType === "focus" ? "focus-block" : "meeting"} clickable-event ${
                         item.duration <= 0.5 ? "event-compact" : ""
+                      } ${
+                        dragState?.meetingId === item.meeting.id ? "event-resizing" : ""
+                      } ${
+                        meetingReminder?.type === "live" ? "event-live" : ""
                       }`}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -1428,7 +1583,7 @@ function PlannerPage({
                       }}
                       style={{
                         top: `calc(54px + ${(offsetMinutes / 30) * 32}px)`,
-                        height: `${Math.max((item.duration * 60 / 30) * 32, 64)}px`,
+                        height: `${Math.max((item.duration * 60 / 30) * 32, 38)}px`,
                         width: `${width}%`,
                         left: `${left}%`,
                         position: "absolute",
@@ -1443,17 +1598,14 @@ function PlannerPage({
                       {itemType === "meeting" && item.meeting.aiNotes && (
                         <span className="event-note">AI Notes On</span>
                       )}
+                      {meetingReminder?.type === "live" && (
+                        <span className="event-reminder-badge live">Live Now</span>
+                      )}
                       <div
-                        style={{
-                          position: "absolute",
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          height: "10px",
-                          cursor: "ns-resize",
-                          background: "rgba(15, 23, 42, 0.08)",
-                        }}
+                        className="event-resize-handle"
+                        aria-hidden="true"
                         onMouseDown={(event) => {
+                          event.preventDefault();
                           event.stopPropagation();
                           const startIndex = timeOptions.findIndex(
                             (opt) => opt.value === item.meeting.startTime
@@ -1504,43 +1656,59 @@ function PlannerPage({
             {upcomingMeetings.length === 0 ? (
               <p className="empty-text">No upcoming meetings found.</p>
             ) : (
-              upcomingMeetings.map((meeting) => (
-                <button
-                  key={meeting.id}
-                  type="button"
-                  className="upcoming-item clickable-event"
-                  aria-label={`Open details for ${meeting.title}`}
-                  onClick={() => setSelectedMeeting(meeting)}
-                >
-                  <div className="upcoming-item-header">
-                    <h4 className="upcoming-item-title">{meeting.title}</h4>
-                    <span className="upcoming-pill">
-                      {meeting.aiNotes ? "AI Notes" : "No AI Notes"}
-                    </span>
-                  </div>
-                  <p className="upcoming-item-subtitle">
-                    {meeting.day || getDayLabelFromIso(meeting.date)} • {meeting.time}
-                  </p>
-                  <div className="upcoming-item-meta">
-                    <span>{formatDueDate(meeting.date)}</span>
-                    <span>{meeting.location || "No location added"}</span>
-                  </div>
-                </button>
-              ))
+              upcomingMeetings.map((meeting) => {
+                const reminder = getMeetingReminderStatus(meeting, currentTime);
+                return (
+                  <button
+                    key={meeting.id}
+                    type="button"
+                    className={`upcoming-item clickable-event ${
+                      reminder ? `meeting-reminder-${reminder.type}` : ""
+                    }`}
+                    aria-label={`Open details for ${meeting.title}`}
+                    onClick={() => setSelectedMeeting(meeting)}
+                  >
+                    <div className="upcoming-item-header">
+                      <h4 className="upcoming-item-title">{meeting.title}</h4>
+                      <span className="upcoming-pill">
+                        {meeting.aiNotes ? "AI Notes" : "No AI Notes"}
+                      </span>
+                    </div>
+                    <p className="upcoming-item-subtitle">
+                      {meeting.day || getDayLabelFromIso(meeting.date)} • {meeting.time}
+                    </p>
+                    <div className="upcoming-item-meta">
+                      <span>{formatDueDate(meeting.date)}</span>
+                      <span>{meeting.location || "No location added"}</span>
+                    </div>
+                    {reminder && (
+                      <span className={`meeting-reminder-badge ${reminder.type}`}>
+                        {reminder.label}
+                      </span>
+                    )}
+                  </button>
+                );
+              })
             )}
           </div>
         </aside>
       </div>
 
       {selectedMeeting && (
-        <div className="meeting-modal-overlay">
-          <div className="meeting-modal">
-            {isEditing ? (
-              <>
-                <h3>
-                  Edit {getCalendarItemType(selectedMeeting) === "focus" ? "Focus Block" : "Meeting"}
-                </h3>
+        <div className="meeting-modal-overlay" onClick={handleClose}>
+          <div
+            className="meeting-modal meeting-detail-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3>
+              {getCalendarItemType(selectedMeeting) === "focus"
+                ? "Focus Block Details"
+                : "Meeting Details"}
+            </h3>
 
+            <div className="form-box">
+              <label className="form-field">
+                <span>Title</span>
                 <input
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
@@ -1550,7 +1718,55 @@ function PlannerPage({
                       : "Meeting title"
                   }
                 />
+              </label>
 
+              <label className="form-field">
+                <span>Date</span>
+                <input
+                  type="date"
+                  value={editDate}
+                  onChange={(e) => setEditDate(e.target.value)}
+                />
+              </label>
+
+              <div className="modal-field-grid">
+                <label className="form-field">
+                  <span>Start time</span>
+                  <select
+                    value={editStartTime}
+                    onChange={(e) => setEditStartTime(e.target.value)}
+                  >
+                    <option value="">Select start time</option>
+                    {timeOptions.map((time) => (
+                      <option key={time.value} value={time.value}>
+                        {time.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="form-field">
+                  <span>End time</span>
+                  <select
+                    value={editEndTime}
+                    onChange={(e) => setEditEndTime(e.target.value)}
+                  >
+                    <option value="">Select end time</option>
+                    {timeOptions.map((time) => (
+                      <option key={time.value} value={time.value}>
+                        {time.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="form-field">
+                <span>
+                  {getCalendarItemType(selectedMeeting) === "focus"
+                    ? "Source"
+                    : "Location"}
+                </span>
                 <input
                   value={editLocation}
                   onChange={(e) => setEditLocation(e.target.value)}
@@ -1560,105 +1776,41 @@ function PlannerPage({
                       : "Meeting location"
                   }
                 />
+              </label>
 
-                <select
-                  value={editStartTime}
-                  onChange={(e) => setEditStartTime(e.target.value)}
-                >
-                  <option value="">Select start time</option>
-                  {timeOptions.map((time) => (
-                    <option key={time.value} value={time.value}>
-                      {time.label}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={editEndTime}
-                  onChange={(e) => setEditEndTime(e.target.value)}
-                >
-                  <option value="">Select end time</option>
-                  {timeOptions.map((time) => (
-                    <option key={time.value} value={time.value}>
-                      {time.label}
-                    </option>
-                  ))}
-                </select>
-
-                {getCalendarItemType(selectedMeeting) === "meeting" && (
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={editAiNotes}
-                      onChange={(e) => setEditAiNotes(e.target.checked)}
-                    />
-                    Enable AI Notes
-                  </label>
-                )}
-              </>
-            ) : (
-              <>
-                <h3>{selectedMeeting.title}</h3>
-                <p>
-                  <strong>Type:</strong>{" "}
-                  {getCalendarItemType(selectedMeeting) === "focus"
-                    ? "Focus Block"
-                    : "Meeting"}
-                </p>
-                <p>
-                  <strong>Day:</strong>{" "}
-                  {selectedMeeting.day || getDayLabelFromIso(selectedMeeting.date)}
-                </p>
-                <p>
-                  <strong>Date:</strong> {formatDueDate(selectedMeeting.date)}
-                </p>
-                <p>
-                  <strong>Time:</strong> {selectedMeeting.time}
-                </p>
-                {getCalendarItemType(selectedMeeting) === "meeting" ? (
-                  <>
-                    <p>
-                      <strong>Location:</strong>{" "}
-                      {selectedMeeting.location || "No location added"}
-                    </p>
-                    <p>
-                      <strong>AI Notes:</strong>{" "}
-                      {selectedMeeting.aiNotes ? "Enabled" : "Disabled"}
-                    </p>
-                  </>
-                ) : (
-                  <p>
-                    <strong>Source:</strong>{" "}
-                    {selectedMeeting.location || "Task focus block"}
-                  </p>
-                )}
-                {getCalendarItemType(selectedMeeting) === "meeting" && selectedMeeting.recurrence && (
-                  <p>
-                    <strong>Recurring:</strong> {selectedMeeting.recurrence.frequency} on {selectedMeeting.recurrence.daysOfWeek.join(", ")} until {formatDueDate(selectedMeeting.recurrence.until)}
-                  </p>
-                )}
-              </>
-            )}
-
-            <div className="modal-actions">
-              {isEditing ? (
-                <>
-                  <button className="secondary-btn" onClick={handleSaveEdit}>
-                    Save
-                  </button>
-                  <button
-                    className="secondary-btn"
-                    onClick={() => setIsEditing(false)}
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button className="secondary-btn" onClick={openEdit}>
-                  Edit
-                </button>
+              {getCalendarItemType(selectedMeeting) === "meeting" && (
+                <label className={`toggle-row detail-toggle-row ai-notes-toggle ${editAiNotes ? "enabled" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={editAiNotes}
+                    onChange={(e) => setEditAiNotes(e.target.checked)}
+                  />
+                  <span className="ai-notes-icon" aria-hidden="true">
+                    ✦
+                  </span>
+                  <span>AI Notes enabled</span>
+                </label>
               )}
 
+              <label className="form-field">
+                <span>Notes</span>
+                <textarea
+                  placeholder="Add meeting notes or description"
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                />
+              </label>
+
+              {getCalendarItemType(selectedMeeting) === "meeting" && selectedMeeting.recurrence && (
+                <p className="meeting-detail-meta">
+                  <strong>Recurring:</strong> {selectedMeeting.recurrence.frequency} on {selectedMeeting.recurrence.daysOfWeek.join(", ")} until {formatDueDate(selectedMeeting.recurrence.until)}
+                </p>
+              )}
+
+              <div className="modal-actions">
+                <button className="secondary-btn" onClick={handleSaveEdit}>
+                  Save Changes
+                </button>
               <button className="secondary-btn" onClick={handleDelete}>
                 Delete
               </button>
@@ -1666,6 +1818,7 @@ function PlannerPage({
               <button className="primary-btn" onClick={handleClose}>
                 Close
               </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1674,8 +1827,29 @@ function PlannerPage({
   );
 }
 
-function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
+function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask, currentTime }) {
   const suppressTaskClickRef = useRef(false);
+  const [draggingTaskId, setDraggingTaskId] = useState(null);
+  const [dragOverColumn, setDragOverColumn] = useState(null);
+  const [taskSearchQuery, setTaskSearchQuery] = useState("");
+  const [priorityFilter, setPriorityFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+
+  const filteredTasks = tasks.filter((task) => {
+    // Apply search and dropdown filters before grouping columns.
+    const query = taskSearchQuery.trim().toLowerCase();
+    const matchesSearch =
+      !query ||
+      task.title?.toLowerCase().includes(query) ||
+      task.notes?.toLowerCase().includes(query);
+    const matchesPriority =
+      priorityFilter === "All" ||
+      task.priority?.toLowerCase().includes(priorityFilter.toLowerCase());
+    const matchesStatus =
+      statusFilter === "All" || normalizeTaskStatus(task) === statusFilter;
+
+    return matchesSearch && matchesPriority && matchesStatus;
+  });
 
   // Group tasks by current labels while honoring legacy saved statuses.
   const groupedTasks = TASK_STATUS_COLUMNS.reduce((acc, column) => {
@@ -1683,7 +1857,7 @@ function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
     return acc;
   }, {});
 
-  tasks.forEach((task) => {
+  filteredTasks.forEach((task) => {
     const status = normalizeTaskStatus(task);
     groupedTasks[status].push(task);
   });
@@ -1691,6 +1865,7 @@ function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
   const handleDrop = (event, column) => {
     // Move tasks between board columns without changing their content.
     event.preventDefault();
+    setDragOverColumn(null);
     const taskId = event.dataTransfer.getData("text/plain");
     if (!taskId) return;
     const id = Number(taskId);
@@ -1704,6 +1879,7 @@ function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
   const handleDragStart = (event, task) => {
     // Include both board move data and calendar focus-block data.
     suppressTaskClickRef.current = true;
+    setDraggingTaskId(task.id);
     event.dataTransfer.setData("text/plain", String(task.id));
     event.dataTransfer.setData(
       TASK_DRAG_TYPE,
@@ -1715,107 +1891,378 @@ function TasksPage({ tasks, onDeleteTask, onUpdateTask, onEditTask }) {
     event.dataTransfer.effectAllowed = "copyMove";
   };
 
-  const handlePriorityChange = (taskId, priority) => {
-    onUpdateTask(taskId, { priority });
+  const handleDragEnd = () => {
+    setDraggingTaskId(null);
+    setDragOverColumn(null);
+    window.setTimeout(() => {
+      suppressTaskClickRef.current = false;
+    }, 0);
   };
 
   return (
-    <section className="tasks-board">
-      {TASK_STATUS_COLUMNS.map((column) => (
-        <div
-          key={column.value}
-          className={`tasks-column tasks-column-${column.value
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-|-$/g, "")}`}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => handleDrop(event, column)}
-        >
-          <div className="tasks-column-header">
-            <h3>{column.value}</h3>
-            {column.value === COMPLETED_TASK_STATUS && (
-              <span className="tasks-column-count">
-                {groupedTasks[COMPLETED_TASK_STATUS].length}
-              </span>
-            )}
-          </div>
-          {groupedTasks[column.value].length === 0 ? (
-            <div className="board-empty-state">
-              <h4>No {column.value.toLowerCase()} tasks</h4>
-              <p>{column.emptyText}</p>
+    <section className="tasks-page">
+      <div className="tasks-toolbar">
+        <label className="tasks-search">
+          <span>Search tasks</span>
+          <input
+            type="search"
+            placeholder="Search title or notes"
+            value={taskSearchQuery}
+            onChange={(event) => setTaskSearchQuery(event.target.value)}
+          />
+        </label>
+
+        <label className="tasks-filter">
+          <span>Priority</span>
+          <select
+            value={priorityFilter}
+            onChange={(event) => setPriorityFilter(event.target.value)}
+          >
+            <option value="All">All</option>
+            <option value="Low">Low</option>
+            <option value="Medium">Medium</option>
+            <option value="High">High</option>
+            <option value="Critical">Critical</option>
+          </select>
+        </label>
+
+        <label className="tasks-filter">
+          <span>Status</span>
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+          >
+            <option value="All">All</option>
+            {TASK_STATUS_OPTIONS.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <section className="tasks-board">
+        {TASK_STATUS_COLUMNS.map((column) => (
+          <div
+            key={column.value}
+            className={`tasks-column tasks-column-${column.value
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-|-$/g, "")} ${
+              dragOverColumn === column.value ? "tasks-column-drag-over" : ""
+            }`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setDragOverColumn(column.value);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                setDragOverColumn(null);
+              }
+            }}
+            onDrop={(event) => handleDrop(event, column)}
+          >
+            <div className="tasks-column-header">
+              <h3>{column.value}</h3>
+              {column.value === COMPLETED_TASK_STATUS && (
+                <span className="tasks-column-count">
+                  {groupedTasks[COMPLETED_TASK_STATUS].length}
+                </span>
+              )}
             </div>
-          ) : (
-            groupedTasks[column.value].map((task) => {
-              const taskIsCompleted =
-                task.completed || normalizeTaskStatus(task) === COMPLETED_TASK_STATUS;
-              return (
-              <div
-                key={task.id}
-                className={`task-card task-card-drag task-card-${column.value
-                  .toLowerCase()
-                  .replace(/[^a-z0-9]+/g, "-")
-                  .replace(/^-|-$/g, "")} ${taskIsCompleted ? "task-completed" : ""}`}
-                draggable
-                onDragStart={(event) => handleDragStart(event, task)}
-                onDragEnd={() => {
-                  window.setTimeout(() => {
-                    suppressTaskClickRef.current = false;
-                  }, 0);
-                }}
-                onClick={() => {
-                  if (suppressTaskClickRef.current) return;
-                  onEditTask(task);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
+            {groupedTasks[column.value].length === 0 ? (
+              <div className="board-empty-state">
+                <h4>No {column.value.toLowerCase()} tasks</h4>
+                <p>{column.emptyText}</p>
+              </div>
+            ) : (
+              groupedTasks[column.value].map((task) => {
+                const taskIsCompleted =
+                  task.completed || normalizeTaskStatus(task) === COMPLETED_TASK_STATUS;
+                const taskReminder = getTaskReminderStatus(task, currentTime);
+                return (
+                <div
+                  key={task.id}
+                  className={`task-card task-card-drag task-card-${column.value
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-|-$/g, "")} ${taskIsCompleted ? "task-completed" : ""} ${
+                    draggingTaskId === task.id ? "task-card-dragging" : ""
+                  } ${taskReminder ? `task-${taskReminder}` : ""}`}
+                  draggable
+                  onDragStart={(event) => handleDragStart(event, task)}
+                  onDragEnd={handleDragEnd}
+                  onClick={() => {
+                    if (suppressTaskClickRef.current) return;
                     onEditTask(task);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="task-card-top">
-                  <div className="task-card-title-wrap">
-                    <strong className={taskIsCompleted ? "task-title-closed" : ""}>
-                      {task.title}
-                    </strong>
-                    {taskIsCompleted && (
-                      <span className="task-status-pill">Completed</span>
-                    )}
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onEditTask(task);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="task-card-top">
+                    <div className="task-card-title-wrap">
+                      <strong className={taskIsCompleted ? "task-title-closed" : ""}>
+                        {task.title}
+                      </strong>
+                      {taskIsCompleted && (
+                        <span className="task-status-pill">Completed</span>
+                      )}
+                      {taskReminder === "overdue" && (
+                        <span className="task-warning-badge overdue">Overdue</span>
+                      )}
+                      {taskReminder === "today" && (
+                        <span className="task-warning-badge today">Due Today</span>
+                      )}
+                    </div>
+                  </div>
+                  <p className="task-card-meta">Due {formatDueDate(task.date)}</p>
+                  {task.notes && <p className="task-card-note">{task.notes}</p>}
+                  <div className="task-card-bottom">
+                    <span className="task-priority-chip">{task.priority}</span>
                   </div>
                 </div>
-                <p className="task-card-meta">Due {formatDueDate(task.date)}</p>
-                {task.notes && <p className="task-card-note">{task.notes}</p>}
-                <div className="task-card-bottom">
-                  <span className="task-priority-chip">{task.priority}</span>
-                </div>
-              </div>
-            );
-            })
-          )}
-        </div>
-      ))}
+              );
+              })
+            )}
+          </div>
+        ))}
+      </section>
     </section>
   );
 }
 
-function StatsPage() {
+function StatsPage({ tasks, meetings }) {
+  const today = new Date();
+  const weekStart = getStartOfWeek(today);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+
+  const totalTasks = tasks.length;
+  const completedTasks = tasks.filter(
+    (task) => task.completed || normalizeTaskStatus(task) === COMPLETED_TASK_STATUS
+  ).length;
+  const productivityScore =
+    totalTasks === 0 ? 0 : Math.round((completedTasks / totalTasks) * 100);
+  const meetingsThisWeek = meetings.filter((meeting) => {
+    if (!meeting.date) return false;
+    const meetingDate = parseLocalDate(meeting.date);
+    return meetingDate >= weekStart && meetingDate <= weekEnd;
+  }).length;
+
+  // Build chart data from current task and meeting state.
+  const statusData = TASK_STATUS_COLUMNS.map((column) => ({
+    label: column.value,
+    value: tasks.filter((task) => normalizeTaskStatus(task) === column.value).length,
+  }));
+
+  const priorityData = [
+    { label: "Critical", value: tasks.filter((task) => task.priority === "Critical").length },
+    { label: "High", value: tasks.filter((task) => task.priority === "High Priority").length },
+    { label: "Medium", value: tasks.filter((task) => task.priority === "Medium Priority").length },
+    { label: "Low", value: tasks.filter((task) => task.priority === "Low Priority").length },
+  ];
+
+  const weeklyCompletionData = WEEKDAY_NAMES.map((dayName, index) => {
+    const date = new Date(weekStart);
+    date.setDate(weekStart.getDate() + index);
+    const iso = localDateToIso(date);
+    return {
+      label: dayName,
+      value: tasks.filter(
+        (task) =>
+          task.date === iso &&
+          (task.completed || normalizeTaskStatus(task) === COMPLETED_TASK_STATUS)
+      ).length,
+    };
+  });
+
   return (
-    <section className="stats-grid">
-      <div className="stat-card">
-        <h3>Focus Time</h3>
-        <p className="stat-number">13h</p>
+    <section className="stats-dashboard">
+      <div className="stats-summary-grid">
+        <StatMetricCard label="Total Tasks" value={totalTasks} helper="All saved tasks" />
+        <StatMetricCard label="Completed Tasks" value={completedTasks} helper="Closed or completed" />
+        <StatMetricCard label="Meetings This Week" value={meetingsThisWeek} helper={`${formatDueDate(localDateToIso(weekStart))} - ${formatDueDate(localDateToIso(weekEnd))}`} />
+        <StatMetricCard label="Productivity Score" value={`${productivityScore}%`} helper="Tasks completed" />
       </div>
-      <div className="stat-card">
-        <h3>Meetings</h3>
-        <p className="stat-number">4</p>
-      </div>
-      <div className="stat-card">
-        <h3>Tasks Completed</h3>
-        <p className="stat-number">72%</p>
+
+      <div className="stats-chart-grid">
+        <DonutStatusChart
+          title="Task Completion by Status"
+          description="Current task distribution across the board."
+          data={statusData}
+        />
+        <PriorityBarChart
+          title="Tasks by Priority"
+          description="Workload grouped by priority level."
+          data={priorityData}
+        />
+        <WeeklyLineChart
+          title="Weekly Completion Activity"
+          description="Completed tasks by due date this week."
+          data={weeklyCompletionData}
+        />
       </div>
     </section>
+  );
+}
+
+function StatMetricCard({ label, value, helper }) {
+  return (
+    <div className="stat-card stat-metric-card">
+      <span>{label}</span>
+      <p className="stat-number">{value}</p>
+      <small>{helper}</small>
+    </div>
+  );
+}
+
+function DonutStatusChart({ title, description, data }) {
+  const total = data.reduce((sum, item) => sum + item.value, 0);
+  const colors = ["#818cf8", "#f59e0b", "#22c55e"];
+  const radius = 68;
+  const circumference = 2 * Math.PI * radius;
+  let runningOffset = 0;
+
+  return (
+    <div className="stat-card chart-card">
+      <div className="chart-card-header">
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <div className="donut-chart-layout">
+        <div className="donut-chart-wrap">
+          <svg viewBox="0 0 180 180" className="donut-chart" role="img" aria-label={title}>
+            <circle className="donut-ring-bg" cx="90" cy="90" r={radius} />
+            {total > 0 &&
+              data.map((item, index) => {
+                const dash = (item.value / total) * circumference;
+                const segment = (
+                  <circle
+                    key={item.label}
+                    className="donut-segment"
+                    cx="90"
+                    cy="90"
+                    r={radius}
+                    stroke={colors[index]}
+                    strokeDasharray={`${dash} ${circumference - dash}`}
+                    strokeDashoffset={-runningOffset}
+                  />
+                );
+                runningOffset += dash;
+                return segment;
+              })}
+          </svg>
+          <div className="donut-center">
+            <strong>{total}</strong>
+            <span>tasks</span>
+          </div>
+        </div>
+        <div className="chart-legend">
+          {data.map((item, index) => (
+            <div className="chart-legend-item" key={item.label}>
+              <span style={{ background: colors[index] }} />
+              <p>{item.label}</p>
+              <strong>{item.value}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PriorityBarChart({ title, description, data }) {
+  const maxValue = Math.max(...data.map((item) => item.value), 1);
+  const colors = ["#ef4444", "#f59e0b", "#6366f1", "#14b8a6"];
+
+  return (
+    <div className="stat-card chart-card">
+      <div className="chart-card-header">
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <div className="priority-bar-chart">
+        {data.map((item, index) => (
+          <div className="priority-bar-column" key={item.label}>
+            <div className="priority-bar-track">
+              <div
+                className="priority-bar-fill"
+                style={{
+                  height: `${Math.max((item.value / maxValue) * 100, item.value > 0 ? 8 : 0)}%`,
+                  background: colors[index],
+                }}
+              />
+            </div>
+            <strong>{item.value}</strong>
+            <span>{item.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WeeklyLineChart({ title, description, data }) {
+  const maxValue = Math.max(...data.map((item) => item.value), 1);
+  const points = data.map((item, index) => {
+    const x = 32 + index * 56;
+    const y = 172 - (item.value / maxValue) * 126;
+    return { ...item, x, y };
+  });
+  const linePath = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
+  const areaPath = `${linePath} L ${points[points.length - 1]?.x || 32} 178 L 32 178 Z`;
+
+  return (
+    <div className="stat-card chart-card weekly-chart-card">
+      <div className="chart-card-header">
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <div className="line-chart-shell">
+        <svg viewBox="0 0 400 210" className="line-chart" role="img" aria-label={title}>
+          <defs>
+            <linearGradient id="weeklyLineFill" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="#6366f1" stopOpacity="0.24" />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
+          {[0, 1, 2, 3].map((line) => (
+            <line
+              key={line}
+              className="line-chart-grid"
+              x1="28"
+              x2="370"
+              y1={46 + line * 44}
+              y2={46 + line * 44}
+            />
+          ))}
+          <path className="line-chart-area" d={areaPath} />
+          <path className="line-chart-path" d={linePath} />
+          {points.map((point) => (
+            <g key={point.label}>
+              <circle className="line-chart-dot" cx={point.x} cy={point.y} r="5" />
+              <text className="line-chart-value" x={point.x} y={point.y - 12}>
+                {point.value}
+              </text>
+              <text className="line-chart-label" x={point.x} y="202">
+                {point.label}
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
+    </div>
   );
 }
 
